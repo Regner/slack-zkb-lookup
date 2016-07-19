@@ -2,11 +2,9 @@
 
 import os
 import json
-import asyncio
+import pika
+import random
 import logging
-
-from random import randint
-from nats.aio.client import Client
 
 
 logging.basicConfig()
@@ -14,73 +12,43 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # App Settings
-NATS_SERVERS = os.environ.get('NATS_SERVERS', 'nats://127.0.0.1:4222')
+RABBITMQ_SERVER = os.environ.get('RABBITMQ_SERVER', 'rabbitmq-alpha')
+
+# RabbitMQ Setup
+connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_SERVER))
+channel = connection.channel()
+
+channel.exchange_declare(exchange='regner', type='topic')
+channel.queue_declare(queue='slack-zkb-lookup', durable=True)
+channel.queue_bind(exchange='regner', queue='slack-zkb-lookup', routing_key='zkillboard.processed.unique_ids')
+logger.info('Connected to RabbitMQ server...')
 
 
-def get_webhooks(ids):
-    webhook = 'https://hooks.slack.com/services/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'
-    return [webhook for x in range(1, randint(1, 5))]
+def callback(ch, method, properties, body):
+    data = json.loads(body.decode())
 
-async def run(loop):
-    client = Client()
-    servers = NATS_SERVERS.split(',')
+    webhooks = ['https://hooks.slack.com/services/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']
 
-    await client.connect(io_loop=loop, servers=servers)
-    logger.info('Connected to NATS server...')
+    for webhook in webhooks:
+        payload = {
+            'webhook': webhook,
+            'kill': random.choice([True, False]),
+            'zkb_data': data['zkb_data'],
+        }
 
+        channel.basic_publish(
+            exchange='regner',
+            routing_key='slack.format.webhook.zkillboard',
+            body=json.dumps(payload),
+            properties=pika.BasicProperties(
+                delivery_mode = 2,
+            ),
+        )
 
-    async def message_handler(msg):
-        try:
-            data = json.loads(msg.data.decode())
-            webhooks = get_webhooks(data['ids'])
-
-            logger.info('Got {} webhooks for killmail with ID {}.'.format(len(webhooks), data['zkb_data']['killID']))
-
-            payload = {
-                'webhooks': webhooks,
-                'zkb_data': data['zkb_data'],
-            }
-
-            await client.publish('slack.format.webhook.zkillboard', str.encode(json.dumps(payload)))
-
-        except Exception as e:
-            logger.info('Got exception: {}'.format(e))
-
-    await client.subscribe('zkillboard.processed.unique_ids', 'slack-zkb-lookup', message_handler)
+    ch.basic_ack(delivery_tag = method.delivery_tag)
+    logging.info('Processed killmail with ID {}.'.format(data['zkb_data']['killID']))
 
 
-if __name__ == '__main__':
-  loop = asyncio.get_event_loop()
-  loop.run_until_complete(run(loop))
-  loop.run_forever()
-
-
-
-
-
-
-
-
-@app.route('/', methods=['POST'])
-def message():
-    message = request.json['message']
-
-    data = json.loads(base64.b64decode(str(message['message']['data'])))
-
-    PS_TOPIC.publish(json.dumps({
-        'webhooks': ['https://hooks.slack.com/services/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'],
-        'killmail': data['killmail'],
-    }))
-    
-    return ('', 204)
-
-
-@app.before_first_request
-def setup_logging():
-    if not app.debug:
-        app.logger.addHandler(logging.StreamHandler())
-        app.logger.setLevel(logging.INFO)
-
-
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=8000)
+channel.basic_qos(prefetch_count=1)
+channel.basic_consume(callback, queue='slack-zkb-lookup')
+channel.start_consuming()
