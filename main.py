@@ -75,7 +75,7 @@ def callback(ch, method, properties, body):
         print(response.text)
         return
 
-    webhooks = response.json()['webhooks']
+    webhooks = response.json()
 
     for webhook in webhooks:
         payload = {
